@@ -42,16 +42,17 @@ import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.update.UpdateRequestBuilder;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.client.transport.TransportClient;
-import org.elasticsearch.common.settings.ImmutableSettings;
+import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.InetSocketTransportAddress;
 import org.elasticsearch.common.unit.DistanceUnit;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
+import org.elasticsearch.index.IndexNotFoundException;
 import org.elasticsearch.index.query.*;
-import org.elasticsearch.indices.IndexMissingException;
 import org.elasticsearch.node.Node;
 import org.elasticsearch.node.NodeBuilder;
 import org.elasticsearch.rest.RestStatus;
+import org.elasticsearch.script.Script;
 import org.elasticsearch.script.ScriptService;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.SearchHits;
@@ -64,6 +65,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -79,7 +81,7 @@ public class ElasticSearchIndex implements IndexProvider {
     private static final Logger log = LoggerFactory.getLogger(ElasticSearchIndex.class);
 
     private static final String TTL_FIELD = "_ttl";
-    private static final String STRING_MAPPING_SUFFIX = "__STRING";
+    private static final String STRING_MAPPPING_SUFFIX = "__STRING";
 
     public static final ImmutableList<String> DATA_SUBDIRS = ImmutableList.of("data", "work", "logs");
 
@@ -221,7 +223,7 @@ public class ElasticSearchIndex implements IndexProvider {
         IndicesExistsResponse response = client.admin().indices().exists(new IndicesExistsRequest(indexName)).actionGet();
         if (!response.isExists()) {
 
-            ImmutableSettings.Builder settings = ImmutableSettings.settingsBuilder();
+            Settings.Builder settings = Settings.settingsBuilder();
 
             ElasticSearchSetup.applySettingsFromTitanConf(settings, config, ES_CREATE_EXTRAS_NS);
 
@@ -294,7 +296,7 @@ public class ElasticSearchIndex implements IndexProvider {
                     "Must either configure configuration file or base directory");
             if (config.has(INDEX_CONF_FILE)) {
                 String configFile = config.get(INDEX_CONF_FILE);
-                ImmutableSettings.Builder sb = ImmutableSettings.settingsBuilder();
+                Settings.Builder sb = Settings.settingsBuilder();
                 log.debug("Configuring ES from YML file [{}]", configFile);
                 FileInputStream fis = null;
                 try {
@@ -311,7 +313,7 @@ public class ElasticSearchIndex implements IndexProvider {
                 log.debug("Configuring ES with data directory [{}]", dataDirectory);
                 File f = new File(dataDirectory);
                 if (!f.exists()) f.mkdirs();
-                ImmutableSettings.Builder b = ImmutableSettings.settingsBuilder();
+                Settings.Builder b = Settings.settingsBuilder();
                 for (String sub : DATA_SUBDIRS) {
                     String subdir = dataDirectory + File.separator + sub;
                     f = new File(subdir);
@@ -333,7 +335,7 @@ public class ElasticSearchIndex implements IndexProvider {
 
         } else {
             log.debug("Configuring ES for network transport");
-            ImmutableSettings.Builder settings = ImmutableSettings.settingsBuilder();
+            Settings.Builder settings = Settings.settingsBuilder();
             if (config.has(CLUSTER_NAME)) {
                 String clustername = config.get(CLUSTER_NAME);
                 Preconditions.checkArgument(StringUtils.isNotBlank(clustername), "Invalid cluster name: %s", clustername);
@@ -344,7 +346,8 @@ public class ElasticSearchIndex implements IndexProvider {
             log.debug("Transport sniffing enabled: {}", config.get(CLIENT_SNIFF));
             settings.put("client.transport.sniff", config.get(CLIENT_SNIFF));
             settings.put("script.disable_dynamic", false);
-            TransportClient tc = new TransportClient(settings.build());
+//            TransportClient tc = new TransportClient(settings.build());
+            TransportClient tc = TransportClient.builder().settings(settings.build()).build();
             int defaultPort = config.has(INDEX_PORT)?config.get(INDEX_PORT):HOST_PORT_DEFAULT;
             for (String host : config.get(INDEX_HOSTS)) {
                 String[] hostparts = host.split(":");
@@ -352,7 +355,7 @@ public class ElasticSearchIndex implements IndexProvider {
                 int hostport = defaultPort;
                 if (hostparts.length == 2) hostport = Integer.parseInt(hostparts[1]);
                 log.info("Configured remote host: {} : {}", hostname, hostport);
-                tc.addTransportAddress(new InetSocketTransportAddress(hostname, hostport));
+                tc.addTransportAddress(new InetSocketTransportAddress(new InetSocketAddress(hostname, hostport)));
             }
             client = tc;
             node = null;
@@ -370,7 +373,7 @@ public class ElasticSearchIndex implements IndexProvider {
     }
 
     private static String getDualMappingName(String key) {
-        return key + STRING_MAPPING_SUFFIX;
+        return key + STRING_MAPPPING_SUFFIX;
     }
 
     @Override
@@ -454,8 +457,10 @@ public class ElasticSearchIndex implements IndexProvider {
         }
 
         try {
-            PutMappingResponse response = client.admin().indices().preparePutMapping(indexName).
-                    setIgnoreConflicts(false).setType(store).setSource(mapping).execute().actionGet();
+//            PutMappingResponse response = client.admin().indices().preparePutMapping(indexName).
+//                    setIgnoreConflicts(false).setType(store).setSource(mapping).execute().actionGet();
+            PutMappingResponse response = client.admin().indices().preparePutMapping(indexName)
+                    .setType(store).setSource(mapping).execute().actionGet();
         } catch (Exception e) {
             throw convert(e);
         }
@@ -565,7 +570,8 @@ public class ElasticSearchIndex implements IndexProvider {
                             brb.add(new DeleteRequest(indexName, storename, docid));
                         } else {
                             String script = getDeletionScript(informations, storename, mutation);
-                            brb.add(client.prepareUpdate(indexName, storename, docid).setScript(script, ScriptService.ScriptType.INLINE));
+                            brb.add(client.prepareUpdate(indexName, storename, docid)
+                                    .setScript(new Script(script, ScriptService.ScriptType.INLINE, null, null)));
                             log.trace("Adding script {}", script);
                         }
 
@@ -584,7 +590,8 @@ public class ElasticSearchIndex implements IndexProvider {
 
                             boolean needUpsert = !mutation.hasDeletions();
                             String script = getAdditionScript(informations, storename, mutation);
-                            UpdateRequestBuilder update = client.prepareUpdate(indexName, storename, docid).setScript(script, ScriptService.ScriptType.INLINE);
+                            UpdateRequestBuilder update = client.prepareUpdate(indexName, storename, docid)
+                                    .setScript(new Script(script, ScriptService.ScriptType.INLINE, null, null));
                             if (needUpsert) {
                                 XContentBuilder doc = getNewDocument(mutation.getAdditions(), informations.get(storename), ttl);
                                 update.setUpsert(doc);
@@ -729,7 +736,7 @@ public class ElasticSearchIndex implements IndexProvider {
         }
     }
 
-    public FilterBuilder getFilter(Condition<?> condition, KeyInformation.StoreRetriever informations) {
+    public QueryBuilder getFilter(Condition<?> condition, KeyInformation.StoreRetriever informations) {
         if (condition instanceof PredicateCondition) {
             PredicateCondition<String, ?> atom = (PredicateCondition) condition;
             Object value = atom.getValue();
@@ -740,19 +747,32 @@ public class ElasticSearchIndex implements IndexProvider {
                 Cmp numRel = (Cmp) titanPredicate;
                 Preconditions.checkArgument(value instanceof Number);
 
+                //for filtering
+//                BoolQueryBuilder boolQueryBuilder = QueryBuilders.boolQuery();
+//                boolQueryBuilder.must(QueryBuilders.matchQuery("dbname", searchDBs));
+
                 switch (numRel) {
                     case EQUAL:
-                        return FilterBuilders.inFilter(key, value);
+//                        QueryBuilders.filteredQuery();
+                        // TODO check is this correct translation?
+                        return QueryBuilders.termsQuery(key, value);
+//                        return FilterBuilders.inFilter(key, value);
                     case NOT_EQUAL:
-                        return FilterBuilders.notFilter(FilterBuilders.inFilter(key, value));
+                        // TODO check is this correct translation?
+                        return QueryBuilders.boolQuery().mustNot(QueryBuilders.termsQuery(key, value));
+//                        return FilterBuilders.notFilter(FilterBuilders.inFilter(key, value));
                     case LESS_THAN:
-                        return FilterBuilders.rangeFilter(key).lt(value);
+//                        return FilterBuilders.rangeFilter(key).lt(value);
+                        return QueryBuilders.boolQuery().filter(QueryBuilders.rangeQuery(key).lt(value));
                     case LESS_THAN_EQUAL:
-                        return FilterBuilders.rangeFilter(key).lte(value);
+//                        return FilterBuilders.rangeFilter(key).lte(value);
+                        return QueryBuilders.boolQuery().filter(QueryBuilders.rangeQuery(key).lte(value));
                     case GREATER_THAN:
-                        return FilterBuilders.rangeFilter(key).gt(value);
+//                        return FilterBuilders.rangeFilter(key).gt(value);
+                        return QueryBuilders.boolQuery().filter(QueryBuilders.rangeQuery(key).gt(value));
                     case GREATER_THAN_EQUAL:
-                        return FilterBuilders.rangeFilter(key).gte(value);
+//                        return FilterBuilders.rangeFilter(key).gte(value);
+                        return QueryBuilders.boolQuery().filter(QueryBuilders.rangeQuery(key).gte(value));
                     default:
                         throw new IllegalArgumentException("Unexpected relation: " + numRel);
                 }
@@ -768,25 +788,40 @@ public class ElasticSearchIndex implements IndexProvider {
 
                 if (titanPredicate == Text.CONTAINS) {
                     value = ((String) value).toLowerCase();
-                    AndFilterBuilder b = FilterBuilders.andFilter();
+//                    AndFilterBuilder b = FilterBuilders.andFilter();
+//                    for (String term : Text.tokenize((String)value)) {
+//                        b.add(FilterBuilders.termFilter(fieldName, term));
+//                    }
+//                    return b;
+
+                    BoolQueryBuilder f = QueryBuilders.boolQuery();
                     for (String term : Text.tokenize((String)value)) {
-                        b.add(FilterBuilders.termFilter(fieldName, term));
+                        f.must(QueryBuilders.boolQuery().filter(QueryBuilders.termsQuery(fieldName, term)));
                     }
+                    BoolQueryBuilder b = QueryBuilders.boolQuery().filter(f);
                     return b;
                 } else if (titanPredicate == Text.CONTAINS_PREFIX) {
                     value = ((String) value).toLowerCase();
-                    return FilterBuilders.prefixFilter(fieldName, (String) value);
+//                    return FilterBuilders.prefixFilter(fieldName, (String) value);
+                    return QueryBuilders.boolQuery().filter(QueryBuilders.prefixQuery(fieldName, (String)value));
                 } else if (titanPredicate == Text.CONTAINS_REGEX) {
                     value = ((String) value).toLowerCase();
-                    return FilterBuilders.regexpFilter(fieldName, (String) value);
+//                    return FilterBuilders.regexpFilter(fieldName, (String) value);
+                    return QueryBuilders.boolQuery().filter(QueryBuilders.regexpQuery(fieldName, (String)value));
                 } else if (titanPredicate == Text.PREFIX) {
-                    return FilterBuilders.prefixFilter(fieldName, (String) value);
+//                    return FilterBuilders.prefixFilter(fieldName, (String) value);
+                    return QueryBuilders.boolQuery().filter(QueryBuilders.prefixQuery(fieldName, (String)value));
                 } else if (titanPredicate == Text.REGEX) {
-                    return FilterBuilders.regexpFilter(fieldName, (String) value);
+//                    return FilterBuilders.regexpFilter(fieldName, (String) value);
+                    return QueryBuilders.boolQuery().filter(QueryBuilders.regexpQuery(fieldName, (String)value));
                 } else if (titanPredicate == Cmp.EQUAL) {
-                    return FilterBuilders.termFilter(fieldName, (String) value);
+//                    return FilterBuilders.termFilter(fieldName, (String) value);
+                    return QueryBuilders.boolQuery().filter(QueryBuilders.termsQuery(fieldName, (String)value));
                 } else if (titanPredicate == Cmp.NOT_EQUAL) {
-                    return FilterBuilders.notFilter(FilterBuilders.termFilter(fieldName, (String) value));
+//                    return FilterBuilders.notFilter(FilterBuilders.termFilter(fieldName, (String) value));
+                    // TODO check correct translation here
+                    return QueryBuilders.boolQuery().mustNot(
+                            QueryBuilders.boolQuery().filter(QueryBuilders.prefixQuery(fieldName, (String)value)));
                 } else
                     throw new IllegalArgumentException("Predicate is not supported for string value: " + titanPredicate);
             } else if (value instanceof Geoshape) {
@@ -794,11 +829,22 @@ public class ElasticSearchIndex implements IndexProvider {
                 Geoshape shape = (Geoshape) value;
                 if (shape.getType() == Geoshape.Type.CIRCLE) {
                     Geoshape.Point center = shape.getPoint();
-                    return FilterBuilders.geoDistanceFilter(key).lat(center.getLatitude()).lon(center.getLongitude()).distance(shape.getRadius(), DistanceUnit.KILOMETERS);
+//                    return FilterBuilders.geoDistanceFilter(key).lat(center.getLatitude()).lon(center.getLongitude()).distance(shape.getRadius(), DistanceUnit.KILOMETERS);
+                    return QueryBuilders.boolQuery().filter(
+                        QueryBuilders.geoDistanceQuery(key)
+                            .lat(center.getLatitude())
+                            .lon(center.getLongitude())
+                            .distance(shape.getRadius(), DistanceUnit.KILOMETERS)
+                    );
                 } else if (shape.getType() == Geoshape.Type.BOX) {
                     Geoshape.Point southwest = shape.getPoint(0);
                     Geoshape.Point northeast = shape.getPoint(1);
-                    return FilterBuilders.geoBoundingBoxFilter(key).bottomRight(southwest.getLatitude(), northeast.getLongitude()).topLeft(northeast.getLatitude(), southwest.getLongitude());
+//                    return FilterBuilders.geoBoundingBoxFilter(key).bottomRight(southwest.getLatitude(), northeast.getLongitude()).topLeft(northeast.getLatitude(), southwest.getLongitude());
+                    return QueryBuilders.boolQuery().filter(
+                            QueryBuilders.geoBoundingBoxQuery(key)
+                                    .bottomRight(southwest.getLatitude(), northeast.getLongitude())
+                                    .topLeft(northeast.getLatitude(), southwest.getLongitude())
+                    );
                 } else
                     throw new IllegalArgumentException("Unsupported or invalid search shape type: " + shape.getType());
             } else if (value instanceof Date || value instanceof Instant) {
@@ -807,17 +853,25 @@ public class ElasticSearchIndex implements IndexProvider {
 
                 switch (numRel) {
                     case EQUAL:
-                        return FilterBuilders.inFilter(key, value);
+//                        return FilterBuilders.inFilter(key, value);
+                        // TODO check is this correct translation?
+                        return QueryBuilders.termsQuery(key, value);
                     case NOT_EQUAL:
-                        return FilterBuilders.notFilter(FilterBuilders.inFilter(key, value));
+//                        return FilterBuilders.notFilter(FilterBuilders.inFilter(key, value));
+                        // TODO check is this correct translation?
+                        return QueryBuilders.boolQuery().mustNot(QueryBuilders.termsQuery(key, value));
                     case LESS_THAN:
-                        return FilterBuilders.rangeFilter(key).lt(value);
+//                        return FilterBuilders.rangeFilter(key).lt(value);
+                        return QueryBuilders.boolQuery().filter(QueryBuilders.rangeQuery(key).lt(value));
                     case LESS_THAN_EQUAL:
-                        return FilterBuilders.rangeFilter(key).lte(value);
+//                        return FilterBuilders.rangeFilter(key).lte(value);
+                        return QueryBuilders.boolQuery().filter(QueryBuilders.rangeQuery(key).lte(value));
                     case GREATER_THAN:
-                        return FilterBuilders.rangeFilter(key).gt(value);
+//                        return FilterBuilders.rangeFilter(key).gt(value);
+                        return QueryBuilders.boolQuery().filter(QueryBuilders.rangeQuery(key).gt(value));
                     case GREATER_THAN_EQUAL:
-                        return FilterBuilders.rangeFilter(key).gte(value);
+//                        return FilterBuilders.rangeFilter(key).gte(value);
+                        return QueryBuilders.boolQuery().filter(QueryBuilders.rangeQuery(key).gte(value));
                     default:
                         throw new IllegalArgumentException("Unexpected relation: " + numRel);
                 }
@@ -825,35 +879,56 @@ public class ElasticSearchIndex implements IndexProvider {
                 Cmp numRel = (Cmp) titanPredicate;
                 switch (numRel) {
                     case EQUAL:
-                        return FilterBuilders.inFilter(key, value);
+//                        return FilterBuilders.inFilter(key, value);
+                        // TODO check is this correct translation?
+                        return QueryBuilders.termsQuery(key, value);
                     case NOT_EQUAL:
-                        return FilterBuilders.notFilter(FilterBuilders.inFilter(key, value));
+//                        return FilterBuilders.notFilter(FilterBuilders.inFilter(key, value));
+                        // TODO check is this correct translation?
+                        return QueryBuilders.boolQuery().mustNot(QueryBuilders.termsQuery(key, value));
                     default:
                         throw new IllegalArgumentException("Boolean types only support EQUAL or NOT_EQUAL");
                 }
 
             } else if (value instanceof UUID) {
                 if (titanPredicate == Cmp.EQUAL) {
-                    return FilterBuilders.termFilter(key, value);
+//                    return FilterBuilders.termFilter(key, value);
+                    return QueryBuilders.boolQuery().filter(QueryBuilders.termsQuery(key, value));
                 } else if (titanPredicate == Cmp.NOT_EQUAL) {
-                    return FilterBuilders.notFilter(FilterBuilders.termFilter(key, value));
+//                    return FilterBuilders.notFilter(FilterBuilders.termFilter(key, value));
+                    return QueryBuilders.boolQuery().mustNot(
+                            QueryBuilders.boolQuery().filter(QueryBuilders.termsQuery(key, value)));
                 } else {
                     throw new IllegalArgumentException("Only equal or not equal is supported for UUIDs: " + titanPredicate);
                 }
             } else throw new IllegalArgumentException("Unsupported type: " + value);
         } else if (condition instanceof Not) {
-            return FilterBuilders.notFilter(getFilter(((Not) condition).getChild(),informations));
+//            return FilterBuilders.notFilter(getFilter(((Not) condition).getChild(),informations));
+            return QueryBuilders.boolQuery().mustNot(getFilter(((Not) condition).getChild(),informations));
         } else if (condition instanceof And) {
-            AndFilterBuilder b = FilterBuilders.andFilter();
+//            AndFilterBuilder b = FilterBuilders.andFilter();
+//            for (Condition c : condition.getChildren()) {
+//                b.add(getFilter(c,informations));
+//            }
+            // TODO check translation
+            BoolQueryBuilder f = QueryBuilders.boolQuery();
             for (Condition c : condition.getChildren()) {
-                b.add(getFilter(c,informations));
+                f.must(getFilter(c,informations));
             }
+            BoolQueryBuilder b = QueryBuilders.boolQuery().filter(f);
             return b;
         } else if (condition instanceof Or) {
-            OrFilterBuilder b = FilterBuilders.orFilter();
+//            OrFilterBuilder b = FilterBuilders.orFilter();
+//            for (Condition c : condition.getChildren()) {
+//                b.add(getFilter(c,informations));
+//            }
+            //            OrFilterBuilder b = FilterBuilders.orFilter();
+            // TODO check translation
+            BoolQueryBuilder f = QueryBuilders.boolQuery();
             for (Condition c : condition.getChildren()) {
-                b.add(getFilter(c,informations));
+                f.should(getFilter(c,informations));
             }
+            BoolQueryBuilder b = QueryBuilders.boolQuery().filter(f);
             return b;
         } else throw new IllegalArgumentException("Invalid condition: " + condition);
     }
@@ -1031,7 +1106,7 @@ public class ElasticSearchIndex implements IndexProvider {
                         .delete(new DeleteIndexRequest(indexName)).actionGet();
                 // We wait for one second to let ES delete the river
                 Thread.sleep(1000);
-            } catch (IndexMissingException e) {
+            } catch (IndexNotFoundException e) {
                 // Index does not exist... Fine
             }
         } catch (Exception e) {

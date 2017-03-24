@@ -9,7 +9,7 @@ import com.thinkaurelius.titan.util.system.IOUtils;
 import org.apache.commons.lang.StringUtils;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.client.transport.TransportClient;
-import org.elasticsearch.common.settings.ImmutableSettings;
+import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.InetSocketTransportAddress;
 import org.elasticsearch.node.Node;
 import org.elasticsearch.node.NodeBuilder;
@@ -18,6 +18,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.lang.reflect.Array;
+import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.Map;
 
@@ -68,7 +69,7 @@ public enum ElasticSearchSetup {
         public Connection connect(Configuration config) throws IOException {
             log.debug("Configuring TransportClient");
 
-            ImmutableSettings.Builder settingsBuilder = settingsBuilder(config);
+            Settings.Builder settingsBuilder = settingsBuilder(config);
 
             if (config.has(ElasticSearchIndex.CLIENT_SNIFF)) {
                 String k = "client.transport.sniff";
@@ -76,7 +77,8 @@ public enum ElasticSearchSetup {
                 log.debug("Set {}: {}", k, config.get(ElasticSearchIndex.CLIENT_SNIFF));
             }
 
-            TransportClient tc = new TransportClient(settingsBuilder.build());
+//            TransportClient tc = new TransportClient(settingsBuilder.build());
+            TransportClient tc = TransportClient.builder().settings(settingsBuilder.build()).build();
             int defaultPort = config.has(INDEX_PORT) ? config.get(INDEX_PORT) : ElasticSearchIndex.HOST_PORT_DEFAULT;
             for (String host : config.get(INDEX_HOSTS)) {
                 String[] hostparts = host.split(":");
@@ -84,7 +86,7 @@ public enum ElasticSearchSetup {
                 int hostport = defaultPort;
                 if (hostparts.length == 2) hostport = Integer.parseInt(hostparts[1]);
                 log.info("Configured remote host: {} : {}", hostname, hostport);
-                tc.addTransportAddress(new InetSocketTransportAddress(hostname, hostport));
+                tc.addTransportAddress(new InetSocketTransportAddress(new InetSocketAddress(hostname, hostport)));
             }
             return new Connection(null, tc);
         }
@@ -99,7 +101,7 @@ public enum ElasticSearchSetup {
 
             log.debug("Configuring Node Client");
 
-            ImmutableSettings.Builder settingsBuilder = settingsBuilder(config);
+            Settings.Builder settingsBuilder = settingsBuilder(config);
 
             if (config.has(ElasticSearchIndex.TTL_INTERVAL)) {
                 String k = "indices.ttl.interval";
@@ -120,8 +122,9 @@ public enum ElasticSearchSetup {
             if (config.has(ElasticSearchIndex.LOCAL_MODE))
                 nodeBuilder.local(config.get(ElasticSearchIndex.LOCAL_MODE));
 
-            if (config.has(ElasticSearchIndex.LOAD_DEFAULT_NODE_SETTINGS))
-                nodeBuilder.loadConfigSettings(config.get(ElasticSearchIndex.LOAD_DEFAULT_NODE_SETTINGS));
+            // TODO this no longer seems relevant in ElasticSearch 2+
+//            if (config.has(ElasticSearchIndex.LOAD_DEFAULT_NODE_SETTINGS))
+//                nodeBuilder.loadConfigSettings(config.get(ElasticSearchIndex.LOAD_DEFAULT_NODE_SETTINGS));
 
             Node node = nodeBuilder.node();
             Client client = node.client();
@@ -154,9 +157,9 @@ public enum ElasticSearchSetup {
      * @return ES settings builder configured according to the {@code config} parameter
      * @throws java.io.IOException if conf-file was set but could not be read
      */
-    private static ImmutableSettings.Builder settingsBuilder(Configuration config) throws IOException {
+    private static Settings.Builder settingsBuilder(Configuration config) throws IOException {
 
-        ImmutableSettings.Builder settings = ImmutableSettings.settingsBuilder();
+        Settings.Builder settings = Settings.settingsBuilder();
 
         // Set Titan defaults
         settings.put("client.transport.ignore_cluster_name", true);
@@ -198,7 +201,7 @@ public enum ElasticSearchSetup {
         return settings;
     }
 
-    static void applySettingsFromFile(ImmutableSettings.Builder settings,
+    static void applySettingsFromFile(Settings.Builder settings,
                                               Configuration config,
                                               ConfigOption<String> confFileOption) throws FileNotFoundException {
         if (config.has(confFileOption)) {
@@ -216,7 +219,7 @@ public enum ElasticSearchSetup {
         }
     }
 
-    static void applySettingsFromTitanConf(ImmutableSettings.Builder settings,
+    static void applySettingsFromTitanConf(Settings.Builder settings,
                                                    Configuration config,
                                                    ConfigNamespace rootNS) {
         int keysLoaded = 0;
@@ -248,7 +251,7 @@ public enum ElasticSearchSetup {
     }
 
 
-    private static void makeLocalDirsIfNecessary(ImmutableSettings.Builder settingsBuilder, Configuration config) {
+    private static void makeLocalDirsIfNecessary(Settings.Builder settingsBuilder, Configuration config) {
         if (config.has(INDEX_DIRECTORY)) {
             String dataDirectory = config.get(INDEX_DIRECTORY);
             File f = new File(dataDirectory);

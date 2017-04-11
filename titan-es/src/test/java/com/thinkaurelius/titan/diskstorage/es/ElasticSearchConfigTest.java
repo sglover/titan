@@ -21,7 +21,7 @@ import com.thinkaurelius.titan.util.system.IOUtils;
 import org.apache.commons.configuration.BaseConfiguration;
 import org.elasticsearch.action.admin.indices.settings.get.GetSettingsRequest;
 import org.elasticsearch.action.admin.indices.settings.get.GetSettingsResponse;
-import org.elasticsearch.common.settings.ImmutableSettings;
+import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.node.Node;
 import org.elasticsearch.node.NodeBuilder;
 import org.junit.Assert;
@@ -258,8 +258,7 @@ public class ElasticSearchConfigTest {
         simpleWriteAndQuery(idx);
 
 
-
-        ImmutableSettings.Builder settingsBuilder = ImmutableSettings.settingsBuilder();
+        Settings.Builder settingsBuilder = Settings.settingsBuilder();
         settingsBuilder.put("discovery.zen.ping.multicast.enabled", "false");
         settingsBuilder.put("discovery.zen.ping.unicast.hosts", "localhost,127.0.0.1:9300");
         settingsBuilder.put("cluster.name", "indexCreationOptions");
@@ -271,7 +270,7 @@ public class ElasticSearchConfigTest {
         assertEquals(String.valueOf(shards), response.getSetting("titan", "index.number_of_shards"));
 
         idx.close();
-        n.stop();
+        n.close();//stop();
         esr.stop();
     }
 
